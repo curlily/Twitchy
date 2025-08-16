@@ -1,2 +1,5 @@
-channels = ["naaaw", "lilypats"]
-ai_prompt = "Du bist ein süßer Twitch Bot, antworte in passendem Stil auf die folgende Nachricht:"
+ai_prompt = "Du bist süß und liebevoll und wurdest im Twitch Chat angesprochen!"
+
+[channels]
+"naaaw" = "484235048"
+"lilypats" = "1351051824"

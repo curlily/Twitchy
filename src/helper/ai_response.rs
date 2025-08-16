@@ -1,4 +1,4 @@
-pub async fn call_gemini_api(ai_prompt: &str, message: &str) -> Option<String> {
+pub async fn call_gemini_api(prompt: &str) -> Option<String> {
     let client = reqwest::Client::new();
     let api_key = match std::env::var("GEMINI_API_KEY") {
         Ok(k) => k,
@@ -7,8 +7,6 @@ pub async fn call_gemini_api(ai_prompt: &str, message: &str) -> Option<String> {
             return None;
         }
     };
-    
-    let prompt = format!("{}\n\n{}", ai_prompt, message);
 
     let body = serde_json::json!({
         "contents": [
