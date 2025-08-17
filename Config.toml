@@ -1,5 +1,7 @@
 ai_prompt = "Du bist süß und liebevoll und wurdest im Twitch Chat angesprochen!"
+channels = ["naaaw", "lilypats"]
+own_user_id = "1351051824"
 
-[channels]
-"naaaw" = "484235048"
-"lilypats" = "1351051824"
+[features]
+auto_category = true
+auto_reply = true

@@ -13,9 +13,7 @@ struct EmoteSet {
 
 #[derive(Debug, Deserialize)]
 struct Emote {
-    id: String,
     name: String,
-    // You could add data.host.files if you want URLs too
 }
 
 pub async fn fetch_user_emotes(user_id: &str) -> Result<Vec<String>, reqwest::Error> {

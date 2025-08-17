@@ -1,38 +1,113 @@
 mod command_registry;
 mod commands;
 mod helper;
+mod config;
+mod features;
 
 use command_registry::{CommandDescriptor};
 use dotenvy::dotenv;
-use serde::Deserialize;
-use std::{collections::HashMap, env, fs, sync::Arc};
+use std::{collections::HashMap, env, sync::Arc};
+use std::sync::Mutex;
 use twitch_irc::{
     login::StaticLoginCredentials,
     message::{PrivmsgMessage, ServerMessage},
     ClientConfig, SecureTCPTransport, TwitchIRCClient,
 };
+use once_cell::sync::Lazy;
+use rustyline::Editor;
+use rustyline::history::DefaultHistory;
+use crate::config::Config;
+use crate::features::init_features;
 
-#[derive(Deserialize)]
-struct Config {
-    channels: HashMap<String, String>,
-    ai_prompt: String,
-}
+pub static CONFIG: Lazy<Arc<Config>> = Lazy::new(|| {
+    Arc::new(Config::load())
+});
+
+pub static EDITOR: Lazy<Arc<Mutex<Editor<(), DefaultHistory>>>> = Lazy::new(|| {
+    Arc::new(Mutex::new(Editor::new().unwrap()))
+});
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> () {
     dotenv().ok();
 
-    // --- Load env & config ---
-    let username = Arc::new(env::var("TWITCH_USERNAME")
-        .expect("TWITCH_USERNAME missing in .env"));
-    let oauth = env::var("TWITCH_OAUTH")
-        .expect("TWITCH_OAUTH missing in .env");
-    let cfg = Arc::new(toml::from_str::<Config>(&fs::read_to_string("Config.toml")?)?);
+    // Initialize features from config
+    let mut features = init_features();
 
+    // Start enabled features
+    for feature in features.iter_mut() {
+        if feature.is_enabled() {
+            feature.start();
+            println!("Feature '{}' started.", feature.name());
+        }
+    }
+
+    // --- Load env & config ---
+    let username = Arc::new(env::var("BOT_USERNAME")
+        .expect("BOT_USERNAME missing in .env"));
+    let oauth = env::var("BOT_OAUTH_TOKEN")
+        .expect("BOT_OAUTH_TOKEN missing in .env");
+
+    // Spawn Twitch bot in a new async task
+    tokio::spawn(async move {
+        run_twitch_bot(&username.clone(), &oauth.clone()).await;
+    });
+
+    println!("Type 'help' for a list of commands.");
+    // TODO: Replace CLI using ratatui
+    loop {
+        let readline = EDITOR.lock().unwrap().readline("> ");
+        match readline {
+            Ok(line) => {
+                let input = line.trim();
+                let locked_features = &mut features;
+
+                match input {
+                    "list" => {
+                        for f in locked_features.iter() {
+                            println!(
+                                "{} - {}",
+                                f.name(),
+                                if f.is_enabled() { "Enabled" } else { "Disabled" }
+                            );
+                        }
+                    }
+                    cmd if cmd.starts_with("start ") => {
+                        let name = cmd.strip_prefix("start ").unwrap();
+                        if let Some(f) = locked_features.iter_mut().find(|f| f.name() == name) {
+                            f.start();
+                            println!("Feature '{}' started.", name);
+                        } else {
+                            println!("Feature '{}' not found.", name);
+                        }
+                    }
+                    cmd if cmd.starts_with("stop ") => {
+                        let name = cmd.strip_prefix("stop ").unwrap();
+                        if let Some(f) = locked_features.iter_mut().find(|f| f.name() == name) {
+                            f.stop();
+                            println!("Feature '{}' stopped.", name);
+                        } else {
+                            println!("Feature '{}' not found.", name);
+                        }
+                    }
+                    "help" => println!("Available commands: list, start <feature>, stop <feature>, help, quit, exit"),
+                    "quit" | "exit" => std::process::exit(0),
+                    _ => println!("Unknown command"),
+                }
+            }
+            Err(_) => {
+                println!("Error reading line");
+                break;
+            }
+        }
+    }
+}
+
+async fn run_twitch_bot(username: &str, oauth: &str) {
     // --- Create client ---
     let client_config = ClientConfig::new_simple(StaticLoginCredentials::new(
-        username.as_ref().clone(),
-        Some(oauth),
+        username.parse().unwrap(),
+        Some(oauth.parse().unwrap()),
     ));
 
     let (mut incoming, client) =
@@ -44,12 +119,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "Joining {} channels: {}",
-        cfg.channels.len(),
-        cfg.channels.keys().cloned().collect::<Vec<_>>().join(", ")
+        CONFIG.channels.len(),
+        CONFIG.channels.join(", ")
     );
 
-    for (name, _id) in &cfg.channels {
-        client.join(name.clone())?;
+    for name in &CONFIG.channels {
+        client.join(name.clone()).expect(format!("Failed to join channel {}", name).as_str());
     }
 
     // --- Build a command map for fast lookup ---
@@ -67,57 +142,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Main message loop ---
     while let Some(message) = incoming.recv().await {
         if let ServerMessage::Privmsg(msg) = message {
+            let username_ref = username.to_lowercase();
             let client_ref = client.clone();
-            let username_ref = username.clone();
-            let cfg_ref = Arc::clone(&cfg); // single Arc clone here
-            let msg_clone = msg.clone();
             let command_map = command_map.clone();
 
             tokio::spawn(async move {
+
                 // Handle commands
-                if let Some((cmd_name, args)) = parse_command(&msg_clone) {
+                if let Some((cmd_name, args)) = parse_command(&msg) {
                     if let Some(descriptor) = command_map.get(cmd_name.as_str()) {
                         if let Some(reply) =
-                            (descriptor.run)(client_ref.clone(), msg_clone.clone(), args).await
+                            (descriptor.run)(client_ref.clone(), msg.clone(), args).await
                         {
-                            let _ = client_ref.say_in_reply_to(&msg_clone, reply).await;
+                            let _ = client_ref.say_in_reply_to(&msg, reply).await;
                         }
                         return; // skip AI if a command matched
                     }
                 }
 
                 // Handle mentions for AI reply
-                if msg_clone
+                if msg
                     .message_text
                     .to_lowercase()
                     .contains(&username_ref.to_lowercase())
                 {
                     // Remove all occurrences of @username (case-insensitive)
-                    let message_without_mention = &msg_clone.message_text
+                    let message_without_mention = &msg.message_text
                         .split_whitespace()
                         .filter(|word| word.to_lowercase() != format!("@{}", &username_ref.to_lowercase()))
                         .collect::<Vec<_>>()
                         .join(" ");
 
-                    let user_id = cfg_ref.channels.get(&msg.channel_login)
-                        .expect(&format!("Missing user ID for {}", &msg.channel_login));
-
-                    let emotes = helper::fetch_user_emotes::fetch_user_emotes(user_id).await.unwrap_or_default();
+                    let emotes = helper::fetch_user_emotes::fetch_user_emotes(&*msg.channel_id).await.unwrap_or_default();
 
                     let prompt = format!(
                         "{}\nYou can use any of the following emotes: {}\nRespond in one paragraph to this message:\n\"{}\"",
-                        cfg_ref.ai_prompt, emotes.join(", "), message_without_mention
+                        CONFIG.ai_prompt, emotes.join(", "), message_without_mention
                     );
 
                     if let Some(ai_reply) = helper::ai_response::call_gemini_api(&prompt).await {
-                        let _ = client_ref.say_in_reply_to(&msg_clone, fix_emote_spacing(&emotes, &ai_reply)).await;
+                        let _ = client_ref.say_in_reply_to(&msg, fix_emote_spacing(&emotes, &ai_reply)).await;
                     }
                 }
             });
         }
     }
-
-    Ok(())
 }
 
 pub fn fix_emote_spacing(emotes: &Vec<String>, input: &str) -> String {
