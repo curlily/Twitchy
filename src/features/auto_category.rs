@@ -7,7 +7,6 @@ use crate::features::Feature;
 pub struct AutoCategory {
     enabled: Arc<Mutex<bool>>,
     task: Option<JoinHandle<()>>,
-
 }
 
 impl AutoCategory {
@@ -40,7 +39,7 @@ impl AutoCategory {
             // Check if the channel is live
             let live = rt.block_on(is_channel_live(&client, &oauth_token, &twitch_client_id, &own_user_id));
             if !live {
-                println!("Channel is offline, skipping auto-category.");
+                //println!("Channel is offline, skipping auto-category.");
                 thread::sleep(Duration::from_secs(60));
                 continue;
             }
@@ -48,7 +47,7 @@ impl AutoCategory {
             let category = get_active_executable_name().unwrap_or("Just Chatting".to_string());
 
             if category != current_category {
-                println!("AutoCategory: changing category to '{}'", category);
+                //println!("AutoCategory: changing category to '{}'", category);
                 current_category = category.clone();
 
                 // Only update your own stream
@@ -180,13 +179,13 @@ pub async fn update_stream_category(
 
     match update_resp {
         Ok(resp) if resp.status().is_success() => {
-            println!("Category updated to '{}'", category_name);
+            //println!("Category updated to '{}'", category_name);
         }
         Ok(resp) => {
-            println!("Failed to update category: {}", resp.status());
+            //println!("Failed to update category: {}", resp.status());
         }
         Err(err) => {
-            println!("Error updating category: {}", err);
+            //println!("Error updating category: {}", err);
         }
     }
 }
