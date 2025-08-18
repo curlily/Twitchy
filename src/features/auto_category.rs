@@ -1,57 +1,83 @@
 use std::env;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use windows::Win32::Foundation::{HWND, MAX_PATH};
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
+use std::path::Path;
+use std::sync::mpsc::Sender;
+use std::time::Duration;
+use reqwest::Client;
+use tokio::runtime::Runtime;
+use crate::CONFIG;
 use crate::features::Feature;
+use crate::twitch;
 
 /// AutoCategory feature
 pub struct AutoCategory {
     enabled: Arc<Mutex<bool>>,
     task: Option<JoinHandle<()>>,
+    logger: Option<Sender<String>>,
 }
 
 impl AutoCategory {
-    /// Create a new AutoCategory feature with initial enabled state
+    /// Create a new AutoCategory feature with initially enabled state
     pub fn new(initial_state: bool) -> Self {
         Self {
             enabled: Arc::new(Mutex::new(initial_state)),
             task: None,
+            logger: None,
         }
     }
 
     /// Internal logic running in background thread
-    fn run_logic(enabled: Arc<Mutex<bool>>) {
+    fn run_logic(enabled: Arc<Mutex<bool>>, logger: Option<Sender<String>>) {
 
         let own_user_id = &CONFIG.own_user_id;
         let rt = Runtime::new().unwrap();
         let client = Client::new();
-        let mut current_category = String::new();
+        let mut last_active_window = String::new();
         let oauth_token = env::var("TWITCH_API_OAUTH_TOKEN")
             .expect("TWITCH_API_OAUTH_TOKEN missing in .env");
         let twitch_client_id = env::var("TWITCH_API_CLIENT_ID")
             .expect("TWITCH_API_CLIENT_ID missing in .env");
+        let mut live_before: bool = true;
 
         loop {
+
             if !*enabled.lock().unwrap() {
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
 
             // Check if the channel is live
-            let live = rt.block_on(is_channel_live(&client, &oauth_token, &twitch_client_id, &own_user_id));
+            let live = rt.block_on(twitch::is_channel_live(&client, &oauth_token, &twitch_client_id, &own_user_id));
+
             if !live {
-                //println!("Channel is offline, skipping auto-category.");
-                thread::sleep(Duration::from_secs(60));
+
+                if live != live_before {
+                    if let Some(log_tx) = &logger {
+                        log_tx.send("[Auto Category] You're offline - waiting for ya~".to_string()).unwrap();
+                    }
+                }
+
+                live_before = live;
+
                 continue;
             }
 
-            let category = get_active_executable_name().unwrap_or("Just Chatting".to_string());
+            let active_window = get_active_executable_name().unwrap_or("Just Chatting".to_string());
 
-            if category != current_category {
-                //println!("AutoCategory: changing category to '{}'", category);
-                current_category = category.clone();
+            if active_window != last_active_window {
+
+                last_active_window = active_window.clone();
 
                 // Only update your own stream
-                rt.block_on(update_stream_category(&client, &oauth_token, &twitch_client_id, &own_user_id, &category));
+                let stream_update_result = rt.block_on(twitch::update_stream_category(&client, &oauth_token, &twitch_client_id, &own_user_id, &active_window));
+                if let Some(log_tx) = &logger {
+                    log_tx.send(stream_update_result).unwrap();
+                }
             }
 
             thread::sleep(Duration::from_secs(1));
@@ -77,7 +103,8 @@ impl Feature for AutoCategory {
             *enabled = true;
         }
         let enabled_clone = Arc::clone(&self.enabled);
-        let handle = std::thread::spawn(move || Self::run_logic(enabled_clone));
+        let logger_clone = self.logger.clone();
+        let handle = thread::spawn(move || Self::run_logic(enabled_clone, logger_clone));
         self.task = Some(handle);
     }
 
@@ -90,16 +117,11 @@ impl Feature for AutoCategory {
             let _ = handle.join();
         }
     }
-}
 
-use windows::Win32::Foundation::{HWND, MAX_PATH};
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
-use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
-use std::path::Path;
-use std::time::Duration;
-use reqwest::Client;
-use tokio::runtime::Runtime;
+    fn set_logger(&mut self, logger: Sender<String>) {
+        self.logger = Some(logger);
+    }
+}
 
 fn get_active_executable_name() -> Option<String> {
     unsafe {
@@ -131,79 +153,4 @@ fn get_active_executable_name() -> Option<String> {
 
         Some(file_name)
     }
-}
-
-use serde_json::{json, Value};
-use crate::CONFIG;
-
-pub async fn update_stream_category(
-    client: &Client,
-    oauth_token: &str,
-    client_id: &str,
-    broadcaster_id: &str,
-    category_name: &str,
-) {
-    // Get the game ID from the game name
-    let game_resp = client
-        .get("https://api.twitch.tv/helix/games")
-        .query(&[("name", category_name)])
-        .header("Client-ID", client_id)
-        .header("Authorization", format!("Bearer {}", oauth_token))
-        .send()
-        .await;
-
-    let game_id = match game_resp {
-        Ok(resp) => {
-            let json: serde_json::Value = resp.json().await.unwrap_or_default();
-            if let Some(id) = json["data"][0]["id"].as_str() {
-                id.to_string()
-            } else {
-                "".to_string() // fallback if game not found
-            }
-        }
-        Err(_) => "".to_string(),
-    };
-
-    // Update the channel's category
-    let body = json!({
-        "game_id": game_id,
-    });
-
-    let update_resp = client
-        .patch(&format!("https://api.twitch.tv/helix/channels?broadcaster_id={}", broadcaster_id))
-        .header("Client-ID", client_id)
-        .header("Authorization", format!("Bearer {}", oauth_token))
-        .json(&body)
-        .send()
-        .await;
-
-    match update_resp {
-        Ok(resp) if resp.status().is_success() => {
-            //println!("Category updated to '{}'", category_name);
-        }
-        Ok(resp) => {
-            //println!("Failed to update category: {}", resp.status());
-        }
-        Err(err) => {
-            //println!("Error updating category: {}", err);
-        }
-    }
-}
-
-async fn is_channel_live(client: &Client, oauth_token: &str, client_id: &str, user_id: &str) -> bool {
-    let resp = client
-        .get("https://api.twitch.tv/helix/streams")
-        .query(&[("user_id", user_id)])
-        .header("Client-ID", client_id)
-        .header("Authorization", format!("Bearer {}", oauth_token))
-        .send()
-        .await;
-
-    if let Ok(resp) = resp {
-        if let Ok(json) = resp.json::<Value>().await {
-            return json["data"].as_array().map(|arr| !arr.is_empty()).unwrap_or(false);
-        }
-    }
-
-    false
 }

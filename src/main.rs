@@ -3,6 +3,7 @@ mod commands;
 mod helper;
 mod config;
 mod features;
+mod twitch;
 
 use crate::config::Config;
 use crate::features::init_features;
@@ -67,6 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for feature in features.iter_mut() {
         if feature.is_enabled() {
+            feature.set_logger(log_tx.clone());
             feature.start();
             log_tx.send(format!("Feature '{}' started.", feature.name())).unwrap();
         }

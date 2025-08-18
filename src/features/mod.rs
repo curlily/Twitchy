@@ -9,6 +9,7 @@ pub trait Feature: Send {
     fn is_enabled(&self) -> bool;
     fn start(&mut self);
     fn stop(&mut self);
+    fn set_logger(&mut self, logger: std::sync::mpsc::Sender<String>);
 }
 
 /// Initialize all features from the config
