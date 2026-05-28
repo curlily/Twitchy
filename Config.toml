@@ -1,7 +1,7 @@
-ai_prompt = "Du bist süß und liebevoll und wurdest im Twitch Chat angesprochen!"
-channels = ["naaaw", "lilypats"]
-own_user_id = "1351051824"
+channels = ["yourchannel"]
+ai_prompt = "You are a friendly Twitch chat bot."
+own_user_id = "123456789"
 
 [features]
-auto_category = true
+auto_category = false
 auto_reply = true
